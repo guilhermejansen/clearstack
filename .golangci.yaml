@@ -1,0 +1,53 @@
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - gocritic
+    - gosec
+    - misspell
+    - revive
+    - unconvert
+    - unparam
+    - whitespace
+
+  settings:
+    revive:
+      rules:
+        - name: var-naming
+        - name: exported
+        - name: package-comments
+          disabled: true
+
+    gocritic:
+      disabled-checks:
+        - ifElseChain
+        - hugeParam
+
+    gosec:
+      excludes:
+        - G304  # file inclusion is part of what clearstack does
+
+  exclusions:
+    generated: lax
+    rules:
+      - path: _test\.go
+        linters: [errcheck, gosec, unparam]
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/guilhermejansen/clearstack

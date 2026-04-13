@@ -1,0 +1,100 @@
+version: 2
+project_name: clearstack
+
+before:
+  hooks:
+    - go mod tidy
+    - go test ./...
+
+builds:
+  - id: clearstack
+    main: ./cmd/clearstack
+    binary: clearstack
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    goos: [darwin, linux, windows]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
+      - -X github.com/guilhermejansen/clearstack/internal/version.Version={{.Version}}
+      - -X github.com/guilhermejansen/clearstack/internal/version.Commit={{.ShortCommit}}
+      - -X github.com/guilhermejansen/clearstack/internal/version.Date={{.Date}}
+
+archives:
+  - formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - LICENSE
+      - README.md
+      - CHANGELOG.md
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  use: git
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+      - "^chore:"
+      - "^style:"
+      - "Merge pull request"
+      - "Merge branch"
+
+brews:
+  - name: clearstack
+    repository:
+      owner: guilhermejansen
+      name: homebrew-tap
+    homepage: https://github.com/guilhermejansen/clearstack
+    description: Safe cross-platform developer disk cleanup for every stack.
+    license: MIT
+    test: |
+      system "#{bin}/clearstack version"
+
+scoops:
+  - name: clearstack
+    repository:
+      owner: guilhermejansen
+      name: scoop-bucket
+    homepage: https://github.com/guilhermejansen/clearstack
+    description: Safe cross-platform developer disk cleanup for every stack.
+    license: MIT
+
+nfpms:
+  - id: clearstack
+    package_name: clearstack
+    vendor: Setup Automatizado
+    maintainer: Guilherme Jansen <guilhermejansen@users.noreply.github.com>
+    homepage: https://github.com/guilhermejansen/clearstack
+    description: Safe cross-platform developer disk cleanup for every stack.
+    license: MIT
+    formats: [deb, rpm, apk]
+
+release:
+  github:
+    owner: guilhermejansen
+    name: clearstack
+  draft: false
+  prerelease: auto
+  header: |
+    ## clearstack {{ .Tag }}
+  footer: |
+    **Full Changelog**: https://github.com/guilhermejansen/clearstack/compare/{{ .PreviousTag }}...{{ .Tag }}
