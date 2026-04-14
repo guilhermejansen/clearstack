@@ -36,9 +36,7 @@ func (f *fallbackTrasher) Trash(path string) (Receipt, error) {
 		return Receipt{}, fmt.Errorf("trash: stat: %w", err)
 	}
 	stamp := time.Now().UTC().Format("20060102T150405.000000000")
-	mirror := strings.TrimPrefix(abs, string(filepath.Separator))
-	mirror = strings.ReplaceAll(mirror, string(filepath.Separator), "__")
-	target := filepath.Join(f.root, stamp, mirror)
+	target := filepath.Join(f.root, stamp, sanitizeMirrorName(abs))
 	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 		return Receipt{}, fmt.Errorf("trash: mkdir: %w", err)
 	}
@@ -51,4 +49,24 @@ func (f *fallbackTrasher) Trash(path string) (Receipt, error) {
 		TrashedAt:     time.Now(),
 		Undoable:      true,
 	}, nil
+}
+
+// sanitizeMirrorName flattens an absolute path into a single component that
+// is safe to use as a filename on every supported OS. It replaces path
+// separators, drive colons, and the reserved Windows characters < > : " | ? *
+// with underscores.
+func sanitizeMirrorName(abs string) string {
+	replacer := strings.NewReplacer(
+		"/", "__",
+		`\`, "__",
+		":", "_",
+		`"`, "_",
+		"<", "_",
+		">", "_",
+		"|", "_",
+		"?", "_",
+		"*", "_",
+	)
+	out := replacer.Replace(abs)
+	return strings.TrimLeft(out, "_")
 }
