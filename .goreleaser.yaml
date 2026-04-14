@@ -58,25 +58,29 @@ changelog:
       - "Merge pull request"
       - "Merge branch"
 
-brews:
-  - name: clearstack
-    repository:
-      owner: guilhermejansen
-      name: homebrew-tap
-    homepage: https://github.com/guilhermejansen/clearstack
-    description: Safe cross-platform developer disk cleanup for every stack.
-    license: MIT
-    test: |
-      system "#{bin}/clearstack version"
-
-scoops:
-  - name: clearstack
-    repository:
-      owner: guilhermejansen
-      name: scoop-bucket
-    homepage: https://github.com/guilhermejansen/clearstack
-    description: Safe cross-platform developer disk cleanup for every stack.
-    license: MIT
+# brews + scoops are intentionally disabled for v1.0.0 — both need a PAT
+# with write access to the tap/bucket repos (HOMEBREW_TAP_GITHUB_TOKEN and
+# SCOOP_BUCKET_GITHUB_TOKEN). Uncomment after configuring those secrets.
+#
+# brews:
+#   - name: clearstack
+#     repository:
+#       owner: guilhermejansen
+#       name: homebrew-tap
+#     homepage: https://github.com/guilhermejansen/clearstack
+#     description: Safe cross-platform developer disk cleanup for every stack.
+#     license: MIT
+#     test: |
+#       system "#{bin}/clearstack version"
+#
+# scoops:
+#   - name: clearstack
+#     repository:
+#       owner: guilhermejansen
+#       name: scoop-bucket
+#     homepage: https://github.com/guilhermejansen/clearstack
+#     description: Safe cross-platform developer disk cleanup for every stack.
+#     license: MIT
 
 nfpms:
   - id: clearstack

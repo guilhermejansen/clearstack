@@ -36,9 +36,12 @@ func printfln(w io.Writer, format string, args ...any) {
 // Paths come from positional args; when none are provided we fall back to
 // the user's home directory, which mirrors the CLI's scan/clean default.
 func runTUI(_ io.Writer, args []string) error {
-	eng, _, err := loadConfigAndEngine(buildEngineOptions{})
+	eng, j, err := loadConfigAndEngine(buildEngineOptions{WithCleaner: true})
 	if err != nil {
 		return err
+	}
+	if j != nil {
+		defer func() { _ = j.Close() }()
 	}
 	roots := args
 	if len(roots) == 0 {

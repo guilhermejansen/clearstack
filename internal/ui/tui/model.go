@@ -168,6 +168,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.matches = append(m.matches, msg.m)
 		m.rebuildFiltered()
 
+	case scanBatchMsg:
+		m.matches = append(m.matches, msg.matches...)
+		m.scanDone = true
+		m.scanErr = msg.err
+		m.rebuildFiltered()
+		cmds = append(cmds, m.sizeMatches())
+
 	case scanDoneMsg:
 		m.scanDone = true
 		m.scanErr = msg.err
