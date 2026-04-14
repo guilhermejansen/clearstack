@@ -36,9 +36,10 @@ analyze, doctor, config, undo) for scriptable workflows.`,
 		Version:       version.Full(),
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		// When invoked with no subcommand, fall through to TUI (Sprint 4).
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runTUIPlaceholder(cmd.OutOrStdout())
+		// When invoked with no subcommand, fall through to the TUI.
+		Args: cobra.ArbitraryArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runTUI(cmd.OutOrStdout(), args)
 		},
 	}
 

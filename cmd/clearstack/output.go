@@ -6,6 +6,8 @@ import (
 	"io"
 
 	"github.com/dustin/go-humanize"
+
+	"github.com/guilhermejansen/clearstack/internal/ui/tui"
 )
 
 // writeJSON encodes v as pretty-printed JSON to w.
@@ -29,10 +31,18 @@ func printfln(w io.Writer, format string, args ...any) {
 	_, _ = fmt.Fprintf(w, format+"\n", args...)
 }
 
-// runTUIPlaceholder is invoked when the user runs `clearstack` with no
-// subcommand. Sprint 4 replaces this with a real Bubble Tea program.
-func runTUIPlaceholder(w io.Writer) error {
-	printfln(w, "clearstack — interactive TUI arrives in Sprint 4.")
-	printfln(w, "For now try: clearstack scan --json | clearstack clean --dry-run | clearstack doctor")
-	return nil
+// runTUI launches the interactive clearstack terminal UI.
+//
+// Paths come from positional args; when none are provided we fall back to
+// the user's home directory, which mirrors the CLI's scan/clean default.
+func runTUI(_ io.Writer, args []string) error {
+	eng, _, err := loadConfigAndEngine(buildEngineOptions{})
+	if err != nil {
+		return err
+	}
+	roots := args
+	if len(roots) == 0 {
+		roots = []string{defaultScanRoot()}
+	}
+	return tui.Run(tui.Options{Engine: eng, Roots: roots})
 }
