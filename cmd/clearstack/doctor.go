@@ -27,6 +27,7 @@ type doctorReport struct {
 	Trasher    string            `json:"trasher"`
 	Tools      map[string]bool   `json:"tools"`
 	Detectors  []detectorSummary `json:"detectors"`
+	Docker     map[string]any    `json:"docker,omitempty"`
 }
 
 type detectorSummary struct {
@@ -64,6 +65,11 @@ func runDoctor(cmd *cobra.Command, _ []string) error {
 		Tools:      tools,
 		Detectors:  ds,
 	}
+	if tools["docker"] {
+		if df, err := detectors.DockerDF(cmd.Context()); err == nil {
+			r.Docker = df
+		}
+	}
 
 	if globalFlags.JSON {
 		return writeJSON(cmd.OutOrStdout(), r)
@@ -78,6 +84,12 @@ func runDoctor(cmd *cobra.Command, _ []string) error {
 	printfln(cmd.OutOrStdout(), "\ntools on PATH:")
 	for name, ok := range r.Tools {
 		printfln(cmd.OutOrStdout(), "  %-8s %s", name, yesno(ok))
+	}
+	if len(r.Docker) > 0 {
+		printfln(cmd.OutOrStdout(), "\ndocker system df:")
+		for k, v := range r.Docker {
+			printfln(cmd.OutOrStdout(), "  %-16s %v", k, v)
+		}
 	}
 	printfln(cmd.OutOrStdout(), "\ndetectors (%d):", len(r.Detectors))
 	for _, d := range r.Detectors {
