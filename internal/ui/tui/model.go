@@ -32,7 +32,13 @@ import (
 type state int
 
 const (
-	stateScanning state = iota
+	// stateCategories is the first screen the user sees: a checkbox list of
+	// every detector registered for the current platform. The user picks
+	// which categories to include before any disk scan happens. Default
+	// selection is "all SafetySafe categories" — caution and danger
+	// detectors require an explicit opt-in, mirroring the CLI semantics.
+	stateCategories state = iota
+	stateScanning
 	stateResults
 	stateConfirming
 	stateCleaning
@@ -59,6 +65,11 @@ type Model struct {
 	width  int
 	height int
 
+	// Category picker state (stateCategories)
+	categories     []detectors.Detector
+	categoryPicked map[detectors.Category]bool
+	categoryCursor int
+
 	// Scan state
 	scanStart time.Time
 	matches   []detectors.Match
@@ -80,6 +91,12 @@ type Model struct {
 	// Dry-run toggle (persistent)
 	dryRun bool
 	hard   bool
+
+	// dangerAcknowledged is the explicit opt-in required on stateConfirming
+	// when the current selection includes any [danger] category. It resets
+	// every time the user enters stateConfirming so a typo on a previous
+	// confirmation cannot leak into the next one.
+	dangerAcknowledged bool
 }
 
 type sortKey int
@@ -106,17 +123,26 @@ func New(opts Options) *Model {
 	fi.Placeholder = "type to filter (category or path)…"
 	fi.CharLimit = 128
 
+	cats := opts.Engine.EnabledCategories()
+	picked := make(map[detectors.Category]bool, len(cats))
+	for _, d := range cats {
+		// Default: every Safe category is on; Caution/Danger require opt-in.
+		picked[d.ID()] = d.Safety() == detectors.SafetySafe
+	}
+
 	return &Model{
-		opts:     opts,
-		state:    stateScanning,
-		theme:    DefaultTheme(),
-		keys:     DefaultKeys(),
-		help:     help.New(),
-		spinner:  sp,
-		progress: pg,
-		filter:   fi,
-		selected: make(map[int]bool),
-		sortBy:   sortSize,
+		opts:           opts,
+		state:          stateCategories,
+		theme:          DefaultTheme(),
+		keys:           DefaultKeys(),
+		help:           help.New(),
+		spinner:        sp,
+		progress:       pg,
+		filter:         fi,
+		selected:       make(map[int]bool),
+		sortBy:         sortSize,
+		categories:     cats,
+		categoryPicked: picked,
 	}
 }
 
@@ -139,13 +165,11 @@ type cleanDoneMsg struct {
 
 // ---- tea.Model ------------------------------------------------------------
 
-// Init kicks off scanning.
+// Init starts the spinner. The first scan does NOT begin automatically —
+// the user picks categories on stateCategories, presses enter to confirm,
+// and the model transitions into stateScanning at that point.
 func (m *Model) Init() tea.Cmd {
-	m.scanStart = time.Now()
-	return tea.Batch(
-		m.spinner.Tick,
-		m.startScan(),
-	)
+	return m.spinner.Tick
 }
 
 // Update handles every event.
@@ -190,14 +214,21 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.state = stateSummary
 
 	case tea.KeyMsg:
-		if m.filtering {
-			cmd := m.handleFilterKey(msg)
-			if cmd != nil {
+		switch {
+		case m.state == stateCategories:
+			if cmd := m.handleCategoryKey(msg); cmd != nil {
 				cmds = append(cmds, cmd)
 			}
-		} else {
-			cmd := m.handleKey(msg)
-			if cmd != nil {
+		case m.state == stateConfirming:
+			if cmd := m.handleConfirmKey(msg); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		case m.filtering:
+			if cmd := m.handleFilterKey(msg); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		default:
+			if cmd := m.handleKey(msg); cmd != nil {
 				cmds = append(cmds, cmd)
 			}
 		}
@@ -208,10 +239,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // View renders the model to a string.
 func (m *Model) View() string {
 	switch m.state {
+	case stateCategories:
+		return m.viewCategories()
 	case stateScanning:
 		return m.viewScanning()
-	case stateResults, stateConfirming:
+	case stateResults:
 		return m.viewResults()
+	case stateConfirming:
+		return m.viewConfirming()
 	case stateCleaning:
 		return m.viewCleaning()
 	case stateSummary:
@@ -223,30 +258,22 @@ func (m *Model) View() string {
 // ---- scanning -------------------------------------------------------------
 
 // startScan returns a command that runs the engine scan in a goroutine and
-// forwards matches back to the model.
-func (m *Model) startScan() tea.Cmd {
+// forwards matches back to the model. picked is the explicit category list
+// the user confirmed on the picker — it is also used to synthesize matches
+// for scan-inert detectors (Docker prune targets, etc).
+func (m *Model) startScan(picked []detectors.Category) tea.Cmd {
 	eng := m.opts.Engine
 	roots := m.opts.Roots
 	return func() tea.Msg {
-		// We launch a goroutine and return the channel-draining function
-		// as the first message via p.Send(). Bubble Tea idiom uses a
-		// program handle via tea.Program; to keep things simple here we
-		// collect synchronously inside a single tea.Cmd that returns a
-		// scanDoneMsg once complete. Progress updates arrive via matchMsg
-		// inside the drain loop we run on a separate goroutine communicating
-		// via a channel — Bubble Tea's recommended pattern for streaming.
-		return scanSync(eng, roots)
+		return scanSync(eng, roots, picked)
 	}
 }
 
-// scanSync runs the engine.Scan collecting matches into a batch that is
-// returned in one go. This is simpler than plumbing a tea.Program pointer
-// through the model; the tradeoff is that the user sees a single reveal
-// moment at the end of scan, not a live-growing list.
-//
-// For a streaming experience we upgrade this in a follow-up by switching to
-// tea.NewProgram(m).Send(matchMsg) from a goroutine.
-func scanSync(eng *engine.Engine, roots []string) tea.Msg {
+// scanSync runs engine.Scan, then appends synthetic matches for any
+// scan-inert detectors the user picked (e.g., docker_build_cache). The full
+// batch is returned in one tea message; the user sees a single reveal at
+// the end of the scan rather than a live-growing list.
+func scanSync(eng *engine.Engine, roots []string, picked []detectors.Category) tea.Msg {
 	ctx := context.Background()
 	matches := []detectors.Match{}
 	out, errc := eng.Scan(ctx, roots)
@@ -254,7 +281,31 @@ func scanSync(eng *engine.Engine, roots []string) tea.Msg {
 		matches = append(matches, m)
 	}
 	err := <-errc
-	// We stash matches in a closure message the update loop can read.
+
+	// Synthesize matches for scan-inert categories (docker_*) the user
+	// picked. Without this, picking docker_build_cache in the TUI would
+	// silently behave the same as not picking it.
+	seen := make(map[detectors.Category]struct{}, len(matches))
+	for _, mm := range matches {
+		seen[mm.Category] = struct{}{}
+	}
+	for _, id := range picked {
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		d := detectors.Default.Get(id)
+		if d == nil || !d.PlatformSupported() {
+			continue
+		}
+		syn, ok := d.(detectors.Synthesizer)
+		if !ok {
+			continue
+		}
+		if mm := syn.Synthesize(); mm != nil {
+			matches = append(matches, *mm)
+		}
+	}
+
 	return scanBatchMsg{matches: matches, err: err}
 }
 
@@ -328,10 +379,130 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		m.filtering = true
 		m.filter.Focus()
 		return textinput.Blink
+	case keyMatches(msg, m.keys.BackToPicker):
+		// Discard scan/selection state and re-render the category picker.
+		m.matches = nil
+		m.filtered = nil
+		m.selected = make(map[int]bool)
+		m.cursor = 0
+		m.scanDone = false
+		m.scanErr = nil
+		m.state = stateCategories
 	case keyMatches(msg, m.keys.Confirm):
-		return m.startClean()
+		// Enter on stateResults moves to the confirmation screen (where
+		// the user reviews count/size/mode and any [danger] selections).
+		// Actually starting the cleanup is gated by Y on stateConfirming.
+		if len(m.selectedMatches()) == 0 {
+			return nil
+		}
+		m.dangerAcknowledged = false
+		m.state = stateConfirming
 	}
 	return nil
+}
+
+// handleConfirmKey drives the stateConfirming screen — the explicit Y/N
+// gate between picking matches and actually running cleanup. The user can:
+//
+//   - press Y to commit (blocked by the danger guard if any [danger]
+//     category is in the selection and `D` has not been pressed first),
+//   - press D to acknowledge danger items (toggles m.dangerAcknowledged),
+//   - press N or esc to return to stateResults and adjust the selection.
+func (m *Model) handleConfirmKey(msg tea.KeyMsg) tea.Cmd {
+	switch msg.String() {
+	case "y", "Y":
+		if m.hasDangerSelection() && !m.dangerAcknowledged {
+			// Block until user acknowledges danger items explicitly.
+			return nil
+		}
+		return m.startClean()
+	case "d", "D":
+		m.dangerAcknowledged = !m.dangerAcknowledged
+	case "n", "N", "esc":
+		m.state = stateResults
+	case "q", "ctrl+c":
+		return tea.Quit
+	}
+	return nil
+}
+
+// handleCategoryKey drives the stateCategories screen. The user can move
+// the cursor, toggle individual entries with space, flip every entry with
+// `a`, snap to "safe-only" with `S`, and press enter to lock in the
+// selection and start the scan.
+func (m *Model) handleCategoryKey(msg tea.KeyMsg) tea.Cmd {
+	switch {
+	case keyMatches(msg, m.keys.Quit):
+		return tea.Quit
+	case keyMatches(msg, m.keys.Help):
+		m.help.ShowAll = !m.help.ShowAll
+	case keyMatches(msg, m.keys.Up):
+		if m.categoryCursor > 0 {
+			m.categoryCursor--
+		}
+	case keyMatches(msg, m.keys.Down):
+		if m.categoryCursor < len(m.categories)-1 {
+			m.categoryCursor++
+		}
+	case keyMatches(msg, m.keys.PageUp):
+		m.categoryCursor -= 10
+		if m.categoryCursor < 0 {
+			m.categoryCursor = 0
+		}
+	case keyMatches(msg, m.keys.PageDown):
+		m.categoryCursor += 10
+		if m.categoryCursor >= len(m.categories) {
+			m.categoryCursor = len(m.categories) - 1
+		}
+	case keyMatches(msg, m.keys.Home):
+		m.categoryCursor = 0
+	case keyMatches(msg, m.keys.End):
+		m.categoryCursor = len(m.categories) - 1
+	case keyMatches(msg, m.keys.Toggle):
+		if m.categoryCursor >= 0 && m.categoryCursor < len(m.categories) {
+			id := m.categories[m.categoryCursor].ID()
+			m.categoryPicked[id] = !m.categoryPicked[id]
+		}
+	case keyMatches(msg, m.keys.ToggleAll):
+		// If everything is on, turn everything off; otherwise turn
+		// everything on. This matches the results screen ToggleAll.
+		allOn := true
+		for _, d := range m.categories {
+			if !m.categoryPicked[d.ID()] {
+				allOn = false
+				break
+			}
+		}
+		for _, d := range m.categories {
+			m.categoryPicked[d.ID()] = !allOn
+		}
+	case keyMatches(msg, m.keys.OnlySafe):
+		for _, d := range m.categories {
+			m.categoryPicked[d.ID()] = d.Safety() == detectors.SafetySafe
+		}
+	case keyMatches(msg, m.keys.Confirm):
+		return m.commitCategoriesAndScan()
+	}
+	return nil
+}
+
+// commitCategoriesAndScan applies the user's category picks to the engine
+// and transitions to stateScanning. It rejects an empty selection by
+// staying on the picker — scanning with zero detectors finds nothing.
+func (m *Model) commitCategoriesAndScan() tea.Cmd {
+	picked := make([]detectors.Category, 0, len(m.categoryPicked))
+	for id, on := range m.categoryPicked {
+		if on {
+			picked = append(picked, id)
+		}
+	}
+	if len(picked) == 0 {
+		return nil
+	}
+	m.opts.Engine.SetCategories(picked)
+	m.state = stateScanning
+	m.scanStart = time.Now()
+	return tea.Batch(m.spinner.Tick, m.startScan(picked))
 }
 
 func (m *Model) handleFilterKey(msg tea.KeyMsg) tea.Cmd {
@@ -385,6 +556,18 @@ func (m *Model) startClean() tea.Cmd {
 	)
 }
 
+// hasDangerSelection reports whether any currently-selected match belongs
+// to a [danger] category. The confirmation screen consults this to decide
+// whether to require an explicit `D` acknowledgement before unlocking Y.
+func (m *Model) hasDangerSelection() bool {
+	for _, mm := range m.selectedMatches() {
+		if mm.Safety == detectors.SafetyDanger {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *Model) selectedMatches() []detectors.Match {
 	if len(m.selected) == 0 {
 		return nil
@@ -429,6 +612,67 @@ func (m *Model) rebuildFiltered() {
 
 // ---- views ----------------------------------------------------------------
 
+// viewCategories renders the initial category-picker screen. Categories
+// are listed alphabetically (the engine returns them sorted), with the
+// safety dot in front of each id. The status bar reports how many
+// categories are selected and the help line lists the relevant keys.
+func (m *Model) viewCategories() string {
+	var b strings.Builder
+	pickedCount := 0
+	for _, on := range m.categoryPicked {
+		if on {
+			pickedCount++
+		}
+	}
+	b.WriteString(m.theme.Header.Render(fmt.Sprintf(
+		"clearstack · pick categories  (%d/%d selected)",
+		pickedCount, len(m.categories),
+	)))
+	b.WriteString("\n\n")
+
+	start, end := m.categoryVisibleRange()
+	for i := start; i < end; i++ {
+		d := m.categories[i]
+		mark := "[ ]"
+		if m.categoryPicked[d.ID()] {
+			mark = "[x]"
+		}
+		safety := m.colorSafety(d.Safety())
+		line := fmt.Sprintf("%s %s %-22s  %s", mark, safety, d.ID(), d.Description())
+		if i == m.categoryCursor {
+			b.WriteString(m.theme.RowSelected.Render(line))
+		} else {
+			b.WriteString(m.theme.Row.Render(line))
+		}
+		b.WriteString("\n")
+	}
+
+	b.WriteString("\n")
+	b.WriteString(m.theme.StatusBar.Render(fmt.Sprintf(
+		"selected %d/%d  ·  roots: %s  ·  enter to scan",
+		pickedCount, len(m.categories), strings.Join(m.opts.Roots, ", "),
+	)))
+	b.WriteString("\n")
+	b.WriteString(m.help.View(m.keys))
+	return b.String()
+}
+
+func (m *Model) categoryVisibleRange() (int, int) {
+	window := m.height - 6
+	if window < 1 {
+		window = 1
+	}
+	start := 0
+	if m.categoryCursor > window/2 {
+		start = m.categoryCursor - window/2
+	}
+	end := start + window
+	if end > len(m.categories) {
+		end = len(m.categories)
+	}
+	return start, end
+}
+
 func (m *Model) viewScanning() string {
 	elapsed := time.Since(m.scanStart).Round(100 * time.Millisecond)
 	title := m.theme.Header.Render("clearstack · scanning")
@@ -467,6 +711,64 @@ func (m *Model) viewResults() string {
 	b.WriteString(m.viewStatusBar())
 	b.WriteString("\n")
 	b.WriteString(m.help.View(m.keys))
+	return b.String()
+}
+
+// viewConfirming renders the explicit Y/N gate the user must clear before
+// any cleanup runs. It reports the count, total size, mode (trash/hard,
+// dry-run flag) and — when applicable — calls out [danger] selections in
+// red and demands an explicit `D` acknowledgement before unlocking Y.
+//
+// This is the last opportunity to bail out (N or esc returns to results).
+func (m *Model) viewConfirming() string {
+	picked := m.selectedMatches()
+
+	var totalBytes int64
+	dangerSelected := make([]detectors.Match, 0)
+	for _, p := range picked {
+		totalBytes += p.SizeBytes
+		if p.Safety == detectors.SafetyDanger {
+			dangerSelected = append(dangerSelected, p)
+		}
+	}
+
+	var b strings.Builder
+	b.WriteString(m.theme.Header.Render("clearstack · confirm cleanup"))
+	b.WriteString("\n\n")
+
+	mode := "trash (recoverable via clearstack undo)"
+	if m.hard {
+		mode = "HARD DELETE (irreversible — bypasses Lixeira)"
+	}
+	dryRun := ""
+	if m.dryRun {
+		dryRun = "  [dry-run: no changes will be made]"
+	}
+
+	b.WriteString(fmt.Sprintf("about to clean %d items totalling %s\n",
+		len(picked), humanBytes(totalBytes)))
+	b.WriteString(fmt.Sprintf("mode: %s%s\n\n", mode, dryRun))
+
+	if len(dangerSelected) > 0 {
+		b.WriteString(m.theme.SafetyDanger.Render(
+			fmt.Sprintf("⚠  %d DANGER item(s) selected — they may DESTROY DATA:",
+				len(dangerSelected))))
+		b.WriteString("\n")
+		for _, d := range dangerSelected {
+			b.WriteString(m.theme.SafetyDanger.Render("  • "+string(d.Category)+" → "+d.Path) + "\n")
+		}
+		b.WriteString("\n")
+		if m.dangerAcknowledged {
+			b.WriteString(m.theme.SafetyCaution.Render("[D] danger acknowledged — Y is unlocked"))
+		} else {
+			b.WriteString(m.theme.SafetyDanger.Render(
+				"press D to acknowledge (required before Y will run cleanup)"))
+		}
+		b.WriteString("\n\n")
+	}
+
+	prompt := "[Y] yes, clean   [N] no, go back   [esc] back to results   [q] quit"
+	b.WriteString(m.theme.StatusBar.Render(prompt))
 	return b.String()
 }
 
