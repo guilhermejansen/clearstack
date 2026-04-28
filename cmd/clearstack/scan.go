@@ -74,11 +74,59 @@ func runScan(cmd *cobra.Command, args []string) error {
 	if err := <-errc; err != nil {
 		printfln(cmd.ErrOrStderr(), "scan: %v", err)
 	}
+
+	// Surface scan-inert categories (e.g., Docker) when the user explicitly
+	// requested them via --categories. Without this, scan would silently
+	// omit them since they have no filesystem footprint.
+	collected = appendSynthetic(collected, scanFlags.Categories)
+
 	if !scanFlags.NoSize {
 		eng.SizeInPlace(ctx, collected)
 	}
 
 	return emitScanResults(cmd, collected, roots)
+}
+
+// appendSynthetic walks every detector in the explicitly-requested category
+// set and asks it for a synthetic match (Synthesizer interface). It is the
+// bridge that lets scan-inert detectors like the Docker family participate
+// in the scan/clean pipeline.
+//
+// When categories is empty (== all categories), no synthesis happens. We
+// never want to implicitly prune Docker just because the user ran
+// `clearstack scan ~/Developer` without any --categories filter.
+func appendSynthetic(collected []detectors.Match, categories []string) []detectors.Match {
+	if len(categories) == 0 {
+		return collected
+	}
+	requested := make(map[detectors.Category]struct{}, len(categories))
+	for _, c := range categories {
+		if c == "" {
+			continue
+		}
+		requested[detectors.Category(c)] = struct{}{}
+	}
+	seen := make(map[detectors.Category]struct{}, len(collected))
+	for _, m := range collected {
+		seen[m.Category] = struct{}{}
+	}
+	for id := range requested {
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		d := detectors.Default.Get(id)
+		if d == nil || !d.PlatformSupported() {
+			continue
+		}
+		syn, ok := d.(detectors.Synthesizer)
+		if !ok {
+			continue
+		}
+		if m := syn.Synthesize(); m != nil {
+			collected = append(collected, *m)
+		}
+	}
+	return collected
 }
 
 func emitScanResults(cmd *cobra.Command, matches []detectors.Match, roots []string) error {

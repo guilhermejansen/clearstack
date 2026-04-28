@@ -47,8 +47,10 @@ func (c *Cleaner) Clean(ctx context.Context, m detectors.Match, opts detectors.C
 		result.Strategy = strategy
 	}
 
-	// Safety gate — always, even for dry-run.
-	if c.Safety != nil {
+	// Safety gate — always, even for dry-run. Pseudo matches (e.g., Docker
+	// prune targets like "docker:images") have no real filesystem path, so
+	// safety validation is meaningless and would always fail; we skip it.
+	if c.Safety != nil && !m.IsPseudo() {
 		if err := c.Safety.Validate(m.Path); err != nil {
 			result.Err = err
 			result.CompletedAt = time.Now()
@@ -86,11 +88,20 @@ func (c *Cleaner) Clean(ctx context.Context, m detectors.Match, opts detectors.C
 		}
 		result.BytesFreed = m.SizeBytes
 	case detectors.StrategyNativeCommand:
-		if err := c.runNative(ctx, m); err != nil {
+		parsed, err := c.runNative(ctx, m)
+		if err != nil {
 			result.Err = err
 			break
 		}
-		result.BytesFreed = m.SizeBytes
+		// Prefer detector-parsed bytes (e.g., docker prune's "Total
+		// reclaimed space" trailer) over Match.SizeBytes — the latter is
+		// always 0 for pseudo matches, so without this the summary would
+		// always misleadingly report "0 B" for Docker prunes.
+		if parsed > 0 {
+			result.BytesFreed = parsed
+		} else {
+			result.BytesFreed = m.SizeBytes
+		}
 	case detectors.StrategyDockerAPI:
 		result.Err = errors.New("cleaner: docker strategy requires DockerCleaner (Sprint 3)")
 	case detectors.StrategyNoop:
@@ -104,21 +115,25 @@ func (c *Cleaner) Clean(ctx context.Context, m detectors.Match, opts detectors.C
 	return result, nil
 }
 
-func (c *Cleaner) runNative(ctx context.Context, m detectors.Match) error {
+// runNative executes a detector's native command and returns the bytes the
+// detector parsed from its output (0 when no parser is implemented or the
+// output didn't contain a parseable size). The caller decides whether to
+// fall back to Match.SizeBytes for the BytesFreed report.
+func (c *Cleaner) runNative(ctx context.Context, m detectors.Match) (int64, error) {
 	if c.Registry == nil {
-		return errors.New("cleaner: registry is nil — cannot resolve native command")
+		return 0, errors.New("cleaner: registry is nil — cannot resolve native command")
 	}
 	d := c.Registry.Get(m.Category)
 	if d == nil {
-		return fmt.Errorf("cleaner: detector %q not registered", m.Category)
+		return 0, fmt.Errorf("cleaner: detector %q not registered", m.Category)
 	}
 	nc, ok := d.(detectors.NativeCommander)
 	if !ok {
-		return fmt.Errorf("cleaner: detector %q does not implement NativeCommander", m.Category)
+		return 0, fmt.Errorf("cleaner: detector %q does not implement NativeCommander", m.Category)
 	}
 	argv, stdin := nc.NativeCommand(m)
 	if len(argv) == 0 {
-		return fmt.Errorf("cleaner: detector %q returned empty argv", m.Category)
+		return 0, fmt.Errorf("cleaner: detector %q returned empty argv", m.Category)
 	}
 	// #nosec G204 — argv comes exclusively from registered NativeCommander
 	// implementations controlled by this binary. No user-supplied strings
@@ -133,9 +148,12 @@ func (c *Cleaner) runNative(ctx context.Context, m detectors.Match) error {
 	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("cleaner: %s failed: %w: %s", argv[0], err, strings.TrimSpace(string(out)))
+		return 0, fmt.Errorf("cleaner: %s failed: %w: %s", argv[0], err, strings.TrimSpace(string(out)))
 	}
-	return nil
+	if parser, ok := d.(detectors.NativeOutputParser); ok {
+		return parser.ParseNativeOutput(string(out)), nil
+	}
+	return 0, nil
 }
 
 func (c *Cleaner) record(r detectors.CleanResult) {

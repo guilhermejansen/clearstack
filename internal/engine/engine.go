@@ -38,6 +38,28 @@ type Config struct {
 	Workers    int                  // scanner/sizer worker count; 0 = NumCPU
 }
 
+// SetCategories rebuilds the internal scanner so it only emits matches for
+// the given category set (an empty/nil slice means "every supported
+// category"). It is the runtime hook the TUI uses after the user picks
+// categories interactively. Workers is reused from the existing scanner.
+func (e *Engine) SetCategories(cats []detectors.Category) {
+	classifier := NewClassifier(e.Registry.Filter(cats))
+	workers := 0
+	if e.Scanner != nil {
+		workers = e.Scanner.NumWorkers
+	}
+	e.Scanner = NewScanner(classifier, e.Safety, workers)
+}
+
+// EnabledCategories is the set of detectors currently exposed by the
+// platform — the TUI uses this to render its picker.
+func (e *Engine) EnabledCategories() []detectors.Detector {
+	if e.Registry == nil {
+		return nil
+	}
+	return e.Registry.Enabled()
+}
+
 // New builds an Engine from cfg, returning an error on invalid input.
 func New(cfg Config) (*Engine, error) {
 	if cfg.Registry == nil {
@@ -107,13 +129,23 @@ func (e *Engine) needsDormancy(m detectors.Match) bool {
 
 // SizeInPlace fills Match.SizeBytes for every item in matches, concurrently.
 // It is a convenience wrapper around Sizer.SizeMany.
+//
+// Pseudo matches (e.g., docker:images) have no filesystem footprint and are
+// skipped — their size remains zero and the cleanup summary will report
+// bytes freed only after the native prune command runs.
 func (e *Engine) SizeInPlace(ctx context.Context, matches []detectors.Match) {
 	if len(matches) == 0 {
 		return
 	}
-	paths := make([]string, len(matches))
-	for i, m := range matches {
-		paths[i] = m.Path
+	paths := make([]string, 0, len(matches))
+	for _, m := range matches {
+		if m.IsPseudo() {
+			continue
+		}
+		paths = append(paths, m.Path)
+	}
+	if len(paths) == 0 {
+		return
 	}
 	sizes := make(map[string]int64, len(paths))
 	var mu sync.Mutex
@@ -123,6 +155,9 @@ func (e *Engine) SizeInPlace(ctx context.Context, matches []detectors.Match) {
 		mu.Unlock()
 	})
 	for i := range matches {
+		if matches[i].IsPseudo() {
+			continue
+		}
 		matches[i].SizeBytes = sizes[matches[i].Path]
 	}
 }

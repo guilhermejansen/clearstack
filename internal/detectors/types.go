@@ -6,6 +6,7 @@ package detectors
 import (
 	"context"
 	"io/fs"
+	"path/filepath"
 	"time"
 )
 
@@ -81,6 +82,17 @@ type Match struct {
 	ProjectRoot string
 }
 
+// IsPseudo reports whether a match represents a non-filesystem target whose
+// Path is a synthetic identifier (e.g., "docker:images") rather than an
+// absolute disk path. Pseudo matches are produced by Synthesizer detectors
+// when the user explicitly requests a scan-inert category like Docker.
+//
+// The Cleaner skips safety-whitelist validation for pseudo matches because
+// the path is not a real filesystem location.
+func (m Match) IsPseudo() bool {
+	return m.Path != "" && !filepath.IsAbs(m.Path)
+}
+
 // CleanOptions controls how a single match is cleaned.
 type CleanOptions struct {
 	// DryRun reports what would happen without modifying anything.
@@ -140,4 +152,29 @@ type NativeCommander interface {
 	// NativeCommand returns argv for exec.CommandContext and optional stdin.
 	// The working directory (if relevant) is controlled by Match.ProjectRoot.
 	NativeCommand(m Match) (argv []string, stdin string)
+}
+
+// Synthesizer is an optional interface implemented by detectors that have no
+// filesystem footprint and therefore cannot be discovered by the scanner.
+// Docker pruning is the canonical example: nothing on disk identifies the
+// daemon's reclaimable cache, so the detector emits a synthetic Match when
+// the user explicitly opts in via --categories.
+//
+// Synthesize returns nil when the detector cannot operate in the current
+// environment (e.g., the docker binary is missing or the daemon is down).
+type Synthesizer interface {
+	Synthesize() *Match
+}
+
+// NativeOutputParser is an optional interface implemented by detectors whose
+// native command (StrategyNativeCommand) prints reclaimed-bytes information
+// the Cleaner should surface in the run summary. Docker prune is the
+// canonical example: the CLI emits a "Total reclaimed space: X.YGB" line
+// the Cleaner would otherwise discard, leaving BytesFreed at 0.
+//
+// Implementations parse the combined stdout/stderr of the executed command
+// and return the parsed byte count. Return 0 (not an error) when the output
+// did not contain a parseable size — the Cleaner falls back to Match.SizeBytes.
+type NativeOutputParser interface {
+	ParseNativeOutput(combinedOutput string) int64
 }
